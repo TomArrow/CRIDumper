@@ -87,20 +87,41 @@ namespace CRIDumper
             CODEC_TYPE_NONE = 0,
             CODEC_TYPE_VIDEO
         };
+        enum FilmType
+        {
+            Positive = 0,
+		    Negative = 1,
+		    InterPositive = 2,
+		    InterNegative = 3
+	    };
+
+        enum FilmGauge
+        {
+            Gauge16mm = 0,
+		    Gauge35mm2Perf = 1,
+		    Gauge35mm3Perf = 2,
+		    Gauge35mm4Perf = 3
+	    };
+        enum Endianness
+        {
+            ENDIAN_BIG = 0,
+            ENDIAN_LITTLE
+        };
         // End of Blackmagic Cintel SDK content
 
         static void Main(string[] args)
         {
             Dictionary<UInt32, byte[]> tags;
 
-            args = new string[]{ @"H:\Programming\RawBayer2DNG\test images\cri\3\Cintel\Cintel_00086864.cri"};
+            //args = new string[]{ @"H:\Programming\RawBayer2DNG\test images\cri\3\Cintel\Cintel_00086864.cri"};
+            //args = new string[]{ @"H:\Programming\RawBayer2DNG\test images\cri\3\Cintel\.HDR\Cintel_00089040.cri" };
 
             Console.WriteLine((Key)12);
             foreach (string arg in args)
             {
                 tags = readCRITagData(arg);
 
-                string genericSeparator = @"\,";
+                string genericSeparator = ",";
 
                 StringBuilder sb = new StringBuilder();
                 sb.AppendLine("tagname/number,interpreted,hex");
@@ -111,6 +132,7 @@ namespace CRIDumper
 
                         sb.Append((Key)tag.Key);
                         sb.Append(",");
+                        sb.Append('"');
 
                         string stuff;
 
@@ -120,26 +142,52 @@ namespace CRIDumper
                                 int width = (int)BitConverter.ToUInt32(tag.Value, 0);
                                 int height = (int)BitConverter.ToUInt32(tag.Value, 4);
                                 ColorModel colorModel = (ColorModel)BitConverter.ToUInt32(tag.Value, 8);
-                                sb.Append(width+"x"+height+ genericSeparator + colorModel);
+                                Endianness endianness = (Endianness)BitConverter.ToUInt32(tag.Value, 12);
+                                sb.Append(width+"x"+height+ genericSeparator + colorModel+genericSeparator+ endianness);
                                 break;
 
                             // Bool
+                            case Key.ExtendedRange: // Unverified
                             case Key.StabilizerEnabledH:
                             case Key.StabilizerEnabledV:
                             case Key.FlipHorizontal:
                             case Key.FlipVertical:
+                            case Key.Negative: // Unverified
                                 stuff = Helpers.byteArrayToString<bool>(tag.Value, genericSeparator);
                                 sb.Append(stuff);
                                 break;
                             // UInt64
+                            case Key.Keykode: // Unverified
                             case Key.TileSizes:
                                 stuff = Helpers.byteArrayToString<UInt64>(tag.Value, genericSeparator);
                                 sb.Append(stuff);
                                 break;
+                            // UInt16
+                            case Key.OffsetDetectedH: // Unverified
+                            case Key.OffsetDetectedV:// Unverified
+                                stuff = Helpers.byteArrayToString<UInt16>(tag.Value, genericSeparator);
+                                sb.Append(stuff);
+                                break;
 
                             // String
+                            case Key.Header:
                             case Key.CodecName:
+                            case Key.TimeCode:
                                 stuff = System.Text.Encoding.Default.GetString(tag.Value);
+                                sb.Append(stuff);
+                                break;
+
+                            // Specialized
+                            case Key.CodecType:
+                                stuff = ((ContainerCodecType)BitConverter.ToUInt32(tag.Value)).ToString();
+                                sb.Append(stuff);
+                                break;
+                            case Key.FilmType:
+                                stuff = ((FilmType)tag.Value[0]).ToString();
+                                sb.Append(stuff);
+                                break;
+                            case Key.FilmGauge:
+                                stuff = ((FilmGauge)tag.Value[0]).ToString();
                                 sb.Append(stuff);
                                 break;
 
@@ -161,6 +209,7 @@ namespace CRIDumper
                                 sb.Append("[no interpretation implemented]");
                                 break;
                         }
+                        sb.Append('"');
                         sb.Append(",");
 
                         foreach (byte b in tag.Value)
@@ -172,6 +221,54 @@ namespace CRIDumper
                     }
                 }
                 File.WriteAllText(arg + ".tags.csv", sb.ToString());
+
+                // Now dump the actual data.
+                if (tags.ContainsKey((UInt32)Key.FrameData))
+                {
+
+                    // Detect compression
+                    // Only horizontal tiles are supported so far. Assuming there is no vertical tiling.
+                    if (tags.ContainsKey((UInt32)Key.TileSizes))
+                    {
+
+                        byte[] tileSizeData = tags[(UInt32)Key.TileSizes];
+                        int tileCount = tileSizeData.Length / 8; // The tilesizes are saved as Uint64s I think, so dividing by 8 should give the right number.
+
+                        UInt64 totalSizeFromTileSizes = 0;
+                        UInt64[] tileSizes = new UInt64[tileCount];
+                        for (int i = 0; i < tileCount; i++)
+                        {
+                            tileSizes[i] = BitConverter.ToUInt64(tileSizeData, i * 8);
+                            totalSizeFromTileSizes += tileSizes[i];
+                        }
+
+                        byte[] compressedData = tags[(UInt32)Key.FrameData];
+
+
+
+                        byte[] tmpBuffer;
+                        UInt64 alreadyRead = 0;
+                        UInt64 index = 0;
+                        foreach (UInt64 tileSize in tileSizes)
+                        {
+                            tmpBuffer = new byte[tileSize];
+                            index++;
+
+                            Array.Copy(compressedData, (int)alreadyRead, tmpBuffer, 0, (int)tileSize);
+                            alreadyRead += tileSize;
+                            File.WriteAllBytes(arg + ".tile." + index + ".jpg", tmpBuffer);
+                        }
+                    }
+                    else
+                    {
+
+                        // Presuming uncompressed
+                        File.WriteAllBytes(arg + ".data.raw", tags[(UInt32)Key.FrameData]);
+                    }
+
+                    //File.WriteAllBytes("rawcri.jpg", tagData[(UInt32)Key.FrameData]);
+
+                }
             }
 
         }
@@ -184,7 +281,7 @@ namespace CRIDumper
             byte[] currentTagData;
             using (BinaryReader reader = new BinaryReader(File.Open(path, FileMode.Open, FileAccess.Read, FileShare.Read)))
             {
-                while (reader.BaseStream.Position < (reader.BaseStream.Length - 1))
+                while (reader.BaseStream.Position < (reader.BaseStream.Length - 3))
                 {
 
                     currentTag = reader.ReadUInt32();
